@@ -88,7 +88,7 @@ module JSONAPI
         data.merge!({'self' => self_link}) if self_link
       end
 
-      def relationships
+      def relationships(options)
         data = {}
         # Merge in data for has_one relationships.
         has_one_relationships.each do |attribute_name, object|
@@ -108,7 +108,7 @@ module JSONAPI
               # http://jsonapi.org/format/#document-structure-resource-relationships
               data[formatted_attribute_name].merge!({'data' => nil})
             else
-              related_object_serializer = JSONAPI::Serializer.find_serializer(object)
+              related_object_serializer = JSONAPI::Serializer.find_serializer(object, options)
               data[formatted_attribute_name].merge!({
                 'data' => {
                   'type' => related_object_serializer.type.to_s,
@@ -138,7 +138,7 @@ module JSONAPI
             data[formatted_attribute_name].merge!({'data' => []})
             objects = objects || []
             objects.each do |obj|
-              related_object_serializer = JSONAPI::Serializer.find_serializer(obj)
+              related_object_serializer = JSONAPI::Serializer.find_serializer(obj, options)
               data[formatted_attribute_name]['data'] << {
                 'type' => related_object_serializer.type.to_s,
                 'id' => related_object_serializer.id.to_s,
@@ -205,13 +205,13 @@ module JSONAPI
       "#{object.class.name}Serializer"
     end
 
-    def self.find_serializer_class(object)
+    def self.find_serializer_class(object, options)
       class_name = find_serializer_class_name(object)
       class_name.constantize
     end
 
-    def self.find_serializer(object)
-      find_serializer_class(object).new(object)
+    def self.find_serializer(object, options)
+      find_serializer_class(object, options).new(object)
     end
 
     def self.serialize(objects, options = {})
@@ -256,7 +256,7 @@ module JSONAPI
         primary_data = nil
       elsif options[:is_collection]
         # Have object collection.
-        passthrough_options[:serializer] ||= find_serializer_class(objects.first)
+        passthrough_options[:serializer] ||= find_serializer_class(objects.first, options)
         primary_data = serialize_primary_multi(objects, passthrough_options)
       else
         # Duck-typing check for a collection being passed without is_collection true.
@@ -267,7 +267,7 @@ module JSONAPI
             'Must provide `is_collection: true` to `serialize` when serializing collections.')
         end
         # Have single object.
-        passthrough_options[:serializer] ||= find_serializer_class(objects)
+        passthrough_options[:serializer] ||= find_serializer_class(objects, options)
         primary_data = serialize_primary(objects, passthrough_options)
       end
       result = {
@@ -285,13 +285,13 @@ module JSONAPI
         objects.compact.each do |obj|
           # Use the mutability of relationship_data as the return datastructure to take advantage
           # of the internal special merging logic.
-          find_recursive_relationships(obj, inclusion_tree, relationship_data)
+          find_recursive_relationships(obj, inclusion_tree, relationship_data, options)
         end
 
         result['included'] = relationship_data.map do |_, data|
           included_passthrough_options = {}
           included_passthrough_options[:base_url] = passthrough_options[:base_url]
-          included_passthrough_options[:serializer] = find_serializer_class(data[:object])
+          included_passthrough_options[:serializer] = find_serializer_class(data[:object], options)
           included_passthrough_options[:include_linkages] = data[:include_linkages]
           serialize_primary(data[:object], included_passthrough_options)
         end
@@ -318,7 +318,8 @@ module JSONAPI
       # http://jsonapi.org/format/#document-structure-resource-objects
       data.merge!({'attributes' => serializer.attributes}) if !serializer.attributes.nil?
       data.merge!({'links' => serializer.links}) if !serializer.links.nil?
-      data.merge!({'relationships' => serializer.relationships}) unless serializer.relationships.empty?
+      relationships = serializer.relationships(options)
+      data.merge!({'relationships' => relationships}) unless relationships.empty?
       data.merge!({'meta' => serializer.meta}) if !serializer.meta.nil?
       data
     end
@@ -341,12 +342,12 @@ module JSONAPI
     #   ['users', '1'] => {object: <User>, include_linkages: []},
     #   ['users', '2'] => {object: <User>, include_linkages: []},
     # }
-    def self.find_recursive_relationships(root_object, root_inclusion_tree, results)
+    def self.find_recursive_relationships(root_object, root_inclusion_tree, results, options)
       root_inclusion_tree.each do |attribute_name, child_inclusion_tree|
         # Skip the sentinal value, but we need to preserve it for siblings.
         next if attribute_name == :_include
 
-        serializer = JSONAPI::Serializer.find_serializer(root_object)
+        serializer = JSONAPI::Serializer.find_serializer(root_object, options)
         unformatted_attr_name = serializer.unformat_name(attribute_name).to_sym
 
         # We know the name of this relationship, but we don't know where it is stored internally.
@@ -381,7 +382,7 @@ module JSONAPI
           # If it is not set, that indicates that this is an inner path and not a leaf and will
           # be followed by the recursion below.
           objects.each do |obj|
-            obj_serializer = JSONAPI::Serializer.find_serializer(obj)
+            obj_serializer = JSONAPI::Serializer.find_serializer(obj, options)
             # Use keys of ['posts', '1'] for the results to enforce uniqueness.
             # Spec: A compound document MUST NOT include more than one resource object for each
             # type and id pair.
@@ -415,7 +416,7 @@ module JSONAPI
         if !child_inclusion_tree.empty?
           # For each object we just loaded, find all deeper recursive relationships.
           objects.each do |obj|
-            find_recursive_relationships(obj, child_inclusion_tree, results)
+            find_recursive_relationships(obj, child_inclusion_tree, results, options)
           end
         end
       end
@@ -434,9 +435,9 @@ module JSONAPI
     #     'comments' => {_include: true, 'user' => {_include: true}},
     #   }
     def self.parse_relationship_paths(paths)
-      relationships = {}
-      paths.each { |path| merge_relationship_path(path, relationships) }
-      relationships
+      {}.tap do |relationships|
+        paths.each { |path| merge_relationship_path(path, relationships) }
+      end
     end
     class << self; protected :parse_relationship_paths; end
 
